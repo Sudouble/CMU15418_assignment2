@@ -28,6 +28,34 @@ static inline int nextPow2(int n)
     return n;
 }
 
+__global__ void
+escan_upsweep_kernel(int N, int twod, int twod1, int* result) {
+    int t_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = t_idx * twod1;
+
+    if (i < N)
+    {
+        result[i+twod1-1] += result[i+twod-1];
+    }
+}
+
+__global__ void
+escan_zero_kernel(int N, int* result) {
+    result[N-1] = 0;
+}
+
+__global__ void
+escan_downsweep_kernel(int N, int twod, int twod1, int* result) {
+    int t_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = t_idx * twod1;
+
+    if (i < N) {
+        int t = result[i+twod-1];
+        result[i+twod-1] = result[i+twod1-1];
+        result[i+twod1-1] += t;
+    }
+}
+
 void exclusive_scan(int* device_start, int length, int* device_result)
 {
     /* Fill in this function with your exclusive scan implementation.
@@ -39,6 +67,30 @@ void exclusive_scan(int* device_start, int length, int* device_result)
      * both the input and the output arrays are sized to accommodate the next
      * power of 2 larger than the input.
      */
+
+    int rounded_length = nextPow2(length);
+
+    // compute number of blocks and threads per block
+    const int threadsPerBlock = 128;
+
+    for (int twod = 1; twod < rounded_length; twod*=2)
+    {
+        int twod1 = twod*2;
+        int nr_blocks = (rounded_length/twod1 + threadsPerBlock - 1) / threadsPerBlock;
+        escan_upsweep_kernel<<<threadsPerBlock, nr_blocks>>>(rounded_length, twod, twod1, device_result);
+    }
+    cudaThreadSynchronize();
+
+    escan_zero_kernel<<<1, 1>>>(rounded_length, device_result);
+    cudaThreadSynchronize();
+    
+    for (int twod = rounded_length/2; twod >= 1; twod /= 2)
+    {
+        int twod1 = twod*2;
+        int nr_blocks = (rounded_length/twod1 + threadsPerBlock - 1) / threadsPerBlock;
+        escan_downsweep_kernel<<<threadsPerBlock, nr_blocks>>>(rounded_length, twod, twod1, device_result);
+    }
+    cudaThreadSynchronize();
 }
 
 /* This function is a wrapper around the code you will write - it copies the
@@ -113,6 +165,28 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
     return overallDuration;
 }
 
+__global__ void mark_repeats(int *arr, int length, int *dst)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i < length-1) {
+        if (arr[i] == arr[i+1])
+            dst[i] = 1;
+        else
+            dst[i] = 0;
+    }
+}
+
+__global__ void compact_idx(int *arr, int length, int *result)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i < length-1 && arr[i] != arr[i+1])
+        result[arr[i]] = i;
+    else if (i == length-1)
+        result[i] = arr[i]; // Array length
+}
+
 int find_repeats(int *device_input, int length, int *device_output) {
     /* Finds all pairs of adjacent repeated elements in the list, storing the
      * indices of the first element of each pair (in order) into device_result.
@@ -124,9 +198,26 @@ int find_repeats(int *device_input, int length, int *device_output) {
      * of 2 in size, so you can use your exclusive_scan function with them if 
      * it requires that. However, you must ensure that the results of
      * find_repeats are correct given the original length.
-     */    
+     */
+    if (length < 2)
+        return 0;
+
+    int nr_threads = 128;
+    int nr_blocks = (length+nr_threads-1) / nr_threads;
+    mark_repeats<<<nr_blocks, nr_threads>>>(device_input, length, device_output);
+    cudaThreadSynchronize();
+
+    exclusive_scan(device_input, length, device_output);
+    cudaThreadSynchronize();
+
+    cudaMemcpy(device_input, device_output, length * sizeof(int), 
+            cudaMemcpyDeviceToDevice);
+
+    compact_idx<<<nr_blocks, nr_threads>>>(device_input, length, device_output);
+    cudaThreadSynchronize();
+
     return 0;
-}
+} 
 
 /* Timing wrapper around find_repeats. You should not modify this function.
  */
@@ -146,10 +237,11 @@ double cudaFindRepeats(int *input, int length, int *output, int *output_length) 
     cudaThreadSynchronize();
     double endTime = CycleTimer::currentSeconds();
 
-    *output_length = result;
+    // *output_length = result;
 
     cudaMemcpy(output, device_output, length * sizeof(int),
                cudaMemcpyDeviceToHost);
+    *output_length = output[length-1];
 
     cudaFree(device_input);
     cudaFree(device_output);

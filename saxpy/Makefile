@@ -16,13 +16,13 @@ CXX=g++ -m64
 CXXFLAGS=-O3 -Wall
 ifeq ($(ARCH), Darwin)
 # Building on mac
-LDFLAGS=-L/usr/local/depot/cuda-8.0/lib/ -lcudart
+LDFLAGS=-L/usr/local/cuda-12.3/targets/x86_64-linux/lib/ -lcudart
 else
 # Building on Linux
-LDFLAGS=-L/usr/local/depot/cuda-8.0/lib64/ -lcudart
+LDFLAGS=-L/usr/local/cuda-12.3/targets/x86_64-linux/lib/ -lcudart
 endif
 NVCC=nvcc
-NVCCFLAGS=-O3 -m64 --gpu-architecture compute_35
+NVCCFLAGS=-O3 -m64 --gpu-architecture compute_50
 
 
 OBJS=$(OBJDIR)/main.o  $(OBJDIR)/saxpy.o
